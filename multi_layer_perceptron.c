@@ -81,12 +81,12 @@ static void GetInputLimits( const double** inputSamplesTable, size_t samplesNumb
   }
 }
 
-static void NormalizeValues( double* inputsList, size_t inputsNumber, Limits* inputLimitsList )
+static void NormalizeValues( double* valuesList, size_t valuesNumber, Limits* valueLimitsList )
 {
-  for( size_t inputIndex = 0; inputIndex < inputsNumber; inputIndex++ )
+  for( size_t valueIndex = 0; valueIndex < valuesNumber; valueIndex++ )
   {
-    double inputRange = inputLimitsList[ inputIndex ].max - inputLimitsList[ inputIndex ].min;
-    inputsList[ inputIndex ] = ( inputsList[ inputIndex ] - inputLimitsList[ inputIndex ].min ) / inputRange;
+    double valueRange = valueLimitsList[ valueIndex ].max - valueLimitsList[ valueIndex ].min;
+    valuesList[ valueIndex ] = ( valuesList[ valueIndex ] - valueLimitsList[ valueIndex ].min ) / valueRange;
   }
 }
 
@@ -105,12 +105,12 @@ static void GetOutputLimits( const double** outputSamplesTable, size_t samplesNu
   }
 }
 
-static void DenormalizeValues( double* outputsList, size_t outputsNumber, Limits* outputLimitsList )
+static void DenormalizeValues( double* valuesList, size_t valuesNumber, Limits* valueLimitsList )
 {
-  for( size_t outputIndex = 0; outputIndex < outputsNumber; outputIndex++ )
+  for( size_t valueIndex = 0; valueIndex < valuesNumber; valueIndex++ )
   {
-    double outputRange = outputLimitsList[ outputIndex ].max - outputLimitsList[ outputIndex ].min;
-    outputsList[ outputIndex ] = outputsList[ outputIndex ] * outputRange + outputLimitsList[ outputIndex ].min;
+    double valueRange = valueLimitsList[ valueIndex ].max - valueLimitsList[ valueIndex ].min;
+    valuesList[ valueIndex ] = valuesList[ valueIndex ] * valueRange + valueLimitsList[ valueIndex ].min;
   }
 }
 
@@ -118,18 +118,14 @@ double MLPerceptron_Train( MLPerceptron network, const double** inputSamplesTabl
 {
   const size_t MAX_EPOCHS_NUMBER = 100;
   const double TOLERANCE = 1e-6;
-  const double LEARNING_RATE = 0.1, LEARNING_MOMENT = 0.4;
-  
-  // Initialize sequence o sample indexes for random selection during training
-  size_t* randomIndexesList = (size_t*) calloc( samplesNumber, sizeof(size_t) );
-  for (size_t sampleIndex = 0; sampleIndex < samplesNumber; sampleIndex++)
-    randomIndexesList[ sampleIndex ] = sampleIndex;
+  const double LEARNING_RATE = 0.1, MAX_MOMENTUM = 0.4;
   
   double* hiddenActivationsList = (double*) calloc( network->hiddenNeuronsNumber, sizeof(double) );		// Hidden layer internal neuron activations
   double* outputActivationsList = (double*) calloc( network->outputsNumber, sizeof(double) );			// Output neurons activations
   double* outputGradientsList = (double*) calloc( network->outputsNumber, sizeof(double) );				// Output neurons output gradients
   double* fittingErrorsList = (double*) calloc( network->outputsNumber, sizeof(double) );				// Deviation between current epochCount outputs and reference samples
-  double epochError = 0.0;																				// Average epoch deviation from samples (square error)
+  double momentum = 0.0;
+  double averageSquareError = 0.0;																				// Average epoch deviation from samples (square error)
   
   //srand(time(NULL));
   
@@ -150,29 +146,17 @@ double MLPerceptron_Train( MLPerceptron network, const double** inputSamplesTabl
   
   // Adjust weights (train) the network until error is below tolerance or maximum number of epochs is reached
   for( size_t epochCount = 0; epochCount < MAX_EPOCHS_NUMBER; epochCount++ ) 
-  {
-    // Permutation of training sample indexes (to avoid overfitting) 
+  {    
+    momentum = 0.9 * momentum + 0.1 * MAX_MOMENTUM;
+    // Adjust weights and sum resulting square error for all samples (reference input/output sets)
     for( size_t sampleIndex = 0; sampleIndex < samplesNumber; sampleIndex++ )
-    {
-      size_t nextRandomIndex = rand() % samplesNumber;
-      size_t currentRandomIndex = randomIndexesList[ sampleIndex ];
-      randomIndexesList[ sampleIndex ] = randomIndexesList[ nextRandomIndex ];
-      randomIndexesList[ nextRandomIndex ] = currentRandomIndex;
-    }
-    
-    // Adjust weights and sum resulting square error for all samples (reference input/output sets) in random order
-    for( size_t sampleIndex = 0; sampleIndex < samplesNumber; sampleIndex++ )
-    {
-      // Pick next input/output training sample from the shuffled indexes list
-      size_t randomIndex = randomIndexesList[ sampleIndex ];          
-      const double* inputSamplesList = inputSamplesTable[ randomIndex ];
-      const double* outputSamplesList = outputSamplesTable[ randomIndex ];
-      
+    {         
+      const double* inputSamplesList = inputSamplesTable[ sampleIndex ];
+      const double* outputSamplesList = outputSamplesTable[ sampleIndex ];
       // Normalize and add -1 input at the end of inputs list
       memcpy( network->inputsList, inputSamplesList, network->inputsNumber * sizeof(double) );
       NormalizeValues( network->inputsList, network->inputsNumber, network->inputLimitsList );
       network->inputsList[ network->inputsNumber ] = -1.0;
-      
       // First/hidden layer: calculate hidden neurons internal activations and outputs
       for( size_t neuronIndex = 0; neuronIndex < network->hiddenNeuronsNumber; neuronIndex++ ) 
       {
@@ -184,7 +168,9 @@ double MLPerceptron_Train( MLPerceptron network, const double** inputSamplesTabl
         network->hiddenOutputsList[ neuronIndex ] = 1.0 / ( 1.0 + exp( -hiddenActivationsList[ neuronIndex ] ) );
       }
       network->hiddenOutputsList[ network->hiddenNeuronsNumber ] = -1.0;	// Add threshold input
-      
+      // Normalize output samples list
+      memcpy( fittingErrorsList, outputSamplesList, network->outputsNumber * sizeof(double) );
+      NormalizeValues( fittingErrorsList, network->outputsNumber, network->outputLimitsList );
       // Second/output layer: calculate network outputs
       for( size_t outputIndex = 0; outputIndex < network->outputsNumber; outputIndex++ )
       {
@@ -196,20 +182,18 @@ double MLPerceptron_Train( MLPerceptron network, const double** inputSamplesTabl
         double output = 1.0 / ( 1.0 + exp( -outputActivationsList[ outputIndex ] ) );
         
         // Current/epoch network output error and square error sum
-        fittingErrorsList[ outputIndex ] = outputSamplesList[ outputIndex ] - output;
-        epochError += pow( fittingErrorsList[ outputIndex ], 2 );
+        fittingErrorsList[ outputIndex ] = fittingErrorsList[ outputIndex ] - output;
+        averageSquareError += pow( fittingErrorsList[ outputIndex ], 2 );
       }
-      
       // Backpropagation traning: output layer
       for( size_t outputIndex = 0; outputIndex < network->outputsNumber; outputIndex++ )
       {
-        double outputDerivative = exp( -outputActivationsList[ outputIndex ] ) / pow( 1.0 + exp( -outputActivationsList[ outputIndex ] ), 2 );	// sigmoid function derivative at output activation 
-        outputGradientsList[ outputIndex ] = fittingErrorsList[ outputIndex ] * outputDerivative;										// output weight gradient: grad = output_error * output_derivative
-        // hidden_output_weight = hidden_output_weight + LEARNING_RATE * grad * hidden_output
+        double outputDerivative = exp( -outputActivationsList[ outputIndex ] ) / pow( 1.0 + exp( -outputActivationsList[ outputIndex ] ), 2 );  	// sigmoid function derivative at output activation 
+        outputGradientsList[ outputIndex ] = fittingErrorsList[ outputIndex ] * outputDerivative;				// output weight gradient: grad = output_error * output_derivative
+        // output_weight = hidden_output_weight + LEARNING_RATE * grad * hidden_output
         for( size_t neuronIndex = 0; neuronIndex < network->hiddenNeuronsNumber + 1; neuronIndex++ )
-          network->outputWeightsTable[ neuronIndex ][ outputIndex ] += LEARNING_RATE * outputGradientsList[ outputIndex ] * network->hiddenOutputsList[ neuronIndex ];
-      }
-      
+          network->outputWeightsTable[ neuronIndex ][ outputIndex ] += ( 1 + momentum ) * LEARNING_RATE * outputGradientsList[ outputIndex ] * network->hiddenOutputsList[ neuronIndex ];
+      }      
       // Backpropagation traning: hidden layer
       for( size_t neuronIndex = 0; neuronIndex < network->hiddenNeuronsNumber; neuronIndex++ ) 
       {
@@ -220,22 +204,21 @@ double MLPerceptron_Train( MLPerceptron network, const double** inputSamplesTabl
         hiddenOutputGradient *= exp( -hiddenActivationsList[ neuronIndex ] ) / pow( 1.0 + exp( -hiddenActivationsList[ neuronIndex ] ), 2 );		// sigmoid function derivative at hidden activation
         // weight = weight + LEARNING_RATE * grad * input
         for( size_t inputIndex = 0; inputIndex < network->inputsNumber + 1; inputIndex++ )
-          network->inputWeightsTable[ neuronIndex ][ inputIndex ] += LEARNING_RATE * hiddenOutputGradient * network->inputsList[ inputIndex ];
+          network->inputWeightsTable[ neuronIndex ][ inputIndex ] += ( 1 + momentum ) * LEARNING_RATE * hiddenOutputGradient * network->inputsList[ inputIndex ];
       }
     }
     
-    epochError = epochError / samplesNumber;
+    averageSquareError = averageSquareError / samplesNumber;
     
-    if( epochError < TOLERANCE ) break;
+    if( averageSquareError < TOLERANCE ) break;
   }
   
-  free( randomIndexesList );
   free( hiddenActivationsList );
   free( outputActivationsList );
   free( outputGradientsList );
   free( fittingErrorsList );
   
-  return epochError;
+  return averageSquareError;
 }
 
 double MLPerceptron_Validate( MLPerceptron network, const double** inputSamplesTable, const double** outputSamplesTable, size_t samplesNumber )
